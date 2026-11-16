@@ -20,6 +20,7 @@ pub(super) fn render_settings(
         .when_some(app.integration_error.as_ref(), |page, error| {
             page.child(integration_error_banner(error, palette))
         })
+        .child(kernel_update_section(app, palette, cx))
         .child(
             div()
                 .p_4()
@@ -152,6 +153,169 @@ pub(super) fn render_settings(
                     palette,
                 )),
         )
+        .into_any_element()
+}
+
+fn kernel_update_section(
+    app: &PureClash,
+    palette: Palette,
+    cx: &mut Context<PureClash>,
+) -> AnyElement {
+    use crate::kernel::update::{Channel, DownloadSource};
+    let locked = app.kernel_update_locked();
+    div()
+        .mb_4()
+        .p_4()
+        .rounded_md()
+        .bg(palette.surface)
+        .border_1()
+        .border_color(palette.border)
+        .child(section_heading(
+            tr("kernel.title"),
+            tr("kernel.detail"),
+            ICON_GIT_BRANCH,
+            palette,
+        ))
+        .child(
+            div()
+                .mt_2()
+                .text_sm()
+                .text_color(palette.text)
+                .child(if app.kernel_available {
+                    SharedString::from(app.config.mihomo_version.clone())
+                } else {
+                    tr("kernel.missing")
+                }),
+        )
+        .child(
+            div().mt_3().flex().gap_2().children(
+                [Channel::Stable, Channel::Prebuild]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, channel)| {
+                        div()
+                            .id(SharedString::from(format!("kernel-channel-{index}")))
+                            .px_3()
+                            .py_2()
+                            .rounded_sm()
+                            .text_xs()
+                            .bg(if app.config.kernel_channel == channel {
+                                palette.accent
+                            } else {
+                                palette.background
+                            })
+                            .text_color(if app.config.kernel_channel == channel {
+                                palette.surface
+                            } else {
+                                palette.text
+                            })
+                            .cursor_pointer()
+                            .when(locked, |button| button.opacity(0.5))
+                            .child(tr(if channel == Channel::Stable {
+                                "kernel.stable"
+                            } else {
+                                "kernel.prebuild"
+                            }))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_kernel_channel(channel, cx)
+                            }))
+                    }),
+            ),
+        )
+        .child(
+            div()
+                .mt_3()
+                .text_xs()
+                .text_color(palette.muted)
+                .child(tr("kernel.source")),
+        )
+        .child(
+            div().mt_2().flex().gap_2().children(
+                DownloadSource::all()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, source)| {
+                        div()
+                            .id(SharedString::from(format!("kernel-source-{index}")))
+                            .px_3()
+                            .py_2()
+                            .rounded_sm()
+                            .text_xs()
+                            .bg(if app.config.kernel_download_source == source {
+                                palette.accent
+                            } else {
+                                palette.background
+                            })
+                            .text_color(if app.config.kernel_download_source == source {
+                                palette.surface
+                            } else {
+                                palette.text
+                            })
+                            .cursor_pointer()
+                            .when(locked, |button| button.opacity(0.5))
+                            .child(source.label())
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.set_kernel_source(source, cx)
+                                }),
+                            )
+                    }),
+            ),
+        )
+        .child(
+            div()
+                .mt_2()
+                .text_xs()
+                .text_color(palette.muted)
+                .child(tr("kernel.mirror_detail")),
+        )
+        .child(setting_row(
+            "kernel-auto-update",
+            tr("kernel.auto"),
+            tr("kernel.auto_detail"),
+            app.config.kernel_auto_update,
+            !locked,
+            palette,
+            cx.listener(|this, _, _, cx| this.toggle_kernel_auto_update(cx)),
+        ))
+        .child(
+            div()
+                .mt_3()
+                .flex()
+                .gap_2()
+                .children(
+                    [false, true]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, install)| {
+                            div()
+                                .id(SharedString::from(format!("kernel-action-{index}")))
+                                .px_3()
+                                .py_2()
+                                .rounded_sm()
+                                .bg(palette.accent)
+                                .text_xs()
+                                .text_color(palette.surface)
+                                .cursor_pointer()
+                                .when(locked, |button| button.opacity(0.5))
+                                .child(tr(if install {
+                                    "kernel.download"
+                                } else {
+                                    "kernel.check"
+                                }))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.check_kernel_update(install, cx)
+                                }))
+                        }),
+                ),
+        )
+        .children(app.kernel_update_status.as_ref().map(|status| {
+            div()
+                .mt_3()
+                .text_xs()
+                .text_color(palette.muted)
+                .child(status.clone())
+        }))
         .into_any_element()
 }
 

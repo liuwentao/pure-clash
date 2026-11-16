@@ -35,8 +35,8 @@ use crate::platform::{kernel_binary_name, process_guard::terminate_unix};
 const INSTALL_ARG: &str = "--linux-tun-service-install";
 const UNINSTALL_ARG: &str = "--linux-tun-service-uninstall";
 const SERVICE_ARG: &str = "--linux-tun-service";
-// 协议 4 增加服务程序版本和 runtime 目录事务；旧服务必须重装。
-const SERVICE_PROTOCOL: u32 = 4;
+// 协议 5 支持按下载内核版本刷新 root 副本，旧服务必须重装。
+const SERVICE_PROTOCOL: u32 = 5;
 const SERVICE_NAME: &str = "pure-clash-service.service";
 const SERVICE_BINARY: &str = "/usr/libexec/pure-clash-service";
 const SERVICE_ROOT: &str = "/usr/lib/pure-clash";
@@ -109,7 +109,7 @@ impl ServiceResponse {
         Self {
             protocol: SERVICE_PROTOCOL,
             service_version: env!("CARGO_PKG_VERSION").to_owned(),
-            kernel_version: env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION").to_owned(),
+            kernel_version: installed_kernel_version(),
             ok: true,
             running,
             pid,
@@ -121,7 +121,7 @@ impl ServiceResponse {
         Self {
             protocol: SERVICE_PROTOCOL,
             service_version: env!("CARGO_PKG_VERSION").to_owned(),
-            kernel_version: env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION").to_owned(),
+            kernel_version: installed_kernel_version(),
             ok: false,
             running: false,
             pid: None,
@@ -388,7 +388,12 @@ fn normalized_destination(path: &Path) -> Result<PathBuf> {
 }
 
 fn ensure_service(source_kernel: &Path, allow_install: bool) -> Result<()> {
-    if service_is_current() {
+    let version = source_kernel
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        .context("内核路径缺少版本目录")?;
+    if service_is_current(version) {
         return Ok(());
     }
     if !allow_install {
@@ -419,7 +424,7 @@ fn ensure_service(source_kernel: &Path, allow_install: bool) -> Result<()> {
     }
 
     for _ in 0..100 {
-        if service_is_current() {
+        if service_is_current(version) {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
@@ -427,14 +432,14 @@ fn ensure_service(source_kernel: &Path, allow_install: bool) -> Result<()> {
     bail!("Linux TUN 服务安装完成但 IPC 未就绪")
 }
 
-fn service_is_current() -> bool {
+fn service_is_current(version: &str) -> bool {
     // 登录自启探测必须快速且无交互；服务无响应时由上层关闭 TUN 配置并回退
     // 普通内核，不能阻塞整个内核启动。
     request_with_timeout(&ServiceRequest::Ping, Duration::from_millis(500)).is_ok_and(|response| {
         response.ok
             && response.protocol == SERVICE_PROTOCOL
             && response.service_version == env!("CARGO_PKG_VERSION")
-            && response.kernel_version == env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION")
+            && response.kernel_version == version
     })
 }
 
@@ -481,6 +486,16 @@ fn install_service(parent_pid: u32, source_kernel: &Path) -> Result<()> {
     )?;
     atomic_install(&source_service, Path::new(SERVICE_BINARY), 0o755)?;
     atomic_install(&source_kernel, &installed_kernel, 0o755)?;
+    let version = source_kernel
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        .context("内核路径缺少版本目录")?;
+    atomic_write_root(
+        &Path::new(SERVICE_ROOT).join("kernel-version"),
+        version.as_bytes(),
+        0o644,
+    )?;
 
     atomic_write_root(
         Path::new(SERVICE_UNIT),
@@ -1349,8 +1364,11 @@ fn recover_runtime_transaction(uid: libc::uid_t) -> Result<()> {
 fn installed_kernel_path() -> PathBuf {
     Path::new(SERVICE_ROOT)
         .join("kernel")
-        .join(env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION"))
         .join(kernel_binary_name())
+}
+
+fn installed_kernel_version() -> String {
+    fs::read_to_string(Path::new(SERVICE_ROOT).join("kernel-version")).unwrap_or_default()
 }
 
 fn require_root(label: &str) -> Result<()> {
@@ -1505,10 +1523,7 @@ mod tests {
         let response = ServiceResponse::success(None, false);
         assert_eq!(response.protocol, SERVICE_PROTOCOL);
         assert_eq!(response.service_version, env!("CARGO_PKG_VERSION"));
-        assert_eq!(
-            response.kernel_version,
-            env!("PURE_CLASH_DEFAULT_MIHOMO_VERSION")
-        );
+        assert_eq!(response.kernel_version, installed_kernel_version());
 
         // 旧服务响应缺少 service_version，客户端应拒绝并触发受控重装。
         let legacy = r#"{"protocol":3,"kernel_version":"1.19.30","ok":true,"running":false,"pid":null,"error":null}"#;

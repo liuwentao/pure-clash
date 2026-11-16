@@ -32,7 +32,7 @@ Pure Clash is a native Mihomo desktop client built with Rust and Zed GPUI. GPUI 
 The initial upstream review was performed on 2026-08-28. The manifest, pinned source revision, and current implementation remain authoritative for later changes.
 
 - Mihomo provides an HTTP REST controller. `GET /connections` returns a snapshot; Pure Clash polls once per second. Streaming `/memory` and `/logs` are not integrated yet.
-- `kernel/<version>/manifest.json` is the single source for the bundled version. Updates must change and revalidate the controlled manifest; startup does not automatically select the latest upstream release.
+- `kernel/<version>/manifest.json` records the historical baseline and pinned Wintun source/hashes. No kernel or Geo database binaries are committed or packaged. Settings downloads official stable or Prebuild assets; automatic updates are opt-in.
 - The kernel supports `-d` for its home/data directory, `-f` for the config file, `-t` for validation, and controller/secret overrides through `-ext-ctl` and `-secret`.
 - Mihomo is GPL-3.0. Its upstream naming restriction excludes `mihomo` from unaffiliated downstream product names; Pure Clash respects that boundary.
 - GPUI and `gpui_platform` are pinned to Zed `v1.17.2` commit `c8e44cfa7bda9b2e22c8d6934d78969352e7f61a`.
@@ -206,9 +206,9 @@ Imported relative paths must respect the pinned kernel's home/SAFE_PATHS behavio
 
 `geodata/manifest.json` pins GeoSite.dat, GeoIP.dat, and Country.mmdb to one MetaCubeX/meta-rules-dat `release` commit, with file sizes, SHA-256, and license information.
 
-Startup validates the bundled files, atomically installs a complete snapshot, and records `.pure-clash-geodata.json`. Preserve complete newer official updates; if files are missing or corrupt, restore the full bundled snapshot offline. Profile validation and `-t` must never implicitly fetch Geo data.
+Startup validates existing user data and records missing resources without preventing the UI from opening. First setup explicitly downloads the complete pinned snapshot, checks manifest sizes/hashes, and records `.pure-clash-geodata.json`. Preserve complete newer official updates. Profile validation and `-t` never implicitly fetch Geo data. Legacy local resources remain usable, but are absent from new source and packages.
 
-Settings is the explicit online-update entry point: read the official current commit, download all three files from that commit with size/hash checks, and commit the files and state marker as a rollback-capable transaction. On success, restart a running kernel; otherwise the next launch loads the new data. Packages carry the databases, manifest, LICENSE, and NOTICE. Uninstall removes bundled resources, not the user's downloaded data.
+Settings is the explicit online-update entry point: fix the official current commit, download all three files and their `.sha256sum` from that commit, verify hashes, and commit the complete snapshot with rollback. Kernel setup installs missing Geo databases before starting. Download transport shares the user's GitHub/GH-Proxy/ghfast selection. Packages carry only the manifest, LICENSE, and NOTICE; uninstall preserves downloaded user data.
 
 ### 5.4 Updates and saved choices
 
@@ -242,9 +242,9 @@ Windows saves ProxyEnable/ProxyServer and broadcasts through WinINet. GNOME/Cinn
 
 TUN writes the local baseline, regenerates runtime, validates with the same kernel, then restarts. Enabling requires a running kernel. A manual kernel stop clears TUN intent; configuration restarts and tray exit retain it for the next launch.
 
-Windows UAC starts an internal Pure Clash helper (`--run-elevated-kernel <version>`) before normal application initialization. It accepts only the installed kernel version and fixed runtime/data locations, guards the kernel with its own Job Object, and captures redacted TUN diagnostics separately. `wintun.dll` is bundled with verified manifest information.
+Windows UAC starts an internal Pure Clash helper (`--run-elevated-kernel <version>`) before normal application initialization. It accepts only the installed kernel version and fixed runtime/data locations, guards the kernel with its own Job Object, and captures redacted TUN diagnostics separately. `wintun.dll` is downloaded and verified against pinned manifest hashes.
 
-Linux uses the Clash Verge Rev service model. First use executes an internal installer through `pkexec`, validating `PKEXEC_UID`, the Pure Clash parent, and bundled kernel before atomically installing root-owned service/kernel files. Subsequent start/stop requests use the service without another authorization prompt.
+Linux uses the Clash Verge Rev service model. First use executes an internal installer through `pkexec`, validating `PKEXEC_UID`, the Pure Clash parent, and managed kernel path before atomically installing root-owned service/kernel files. Subsequent start/stop requests use the service without another authorization prompt until the service or selected kernel version changes.
 
 The service uses a restricted Unix socket and verifies UID through `SO_PEERCRED`. Length-prefixed JSON IPC supports Ping, Start, Status, and Stop. The GUI cannot choose a privileged executable; Start supplies a runtime bundle with YAML, local resources, and remote-provider descriptions.
 
@@ -308,13 +308,13 @@ targets.<os-arch>:
   binary size / binary SHA-256
 ```
 
-`build.rs` selects the target using `CARGO_CFG_TARGET_OS` and `CARGO_CFG_TARGET_ARCH`. Only that platform's kernel is required. Windows packaging reads `targets.windows-amd64`; Linux uses the same manifest. Windows and Linux binaries are committed under the name `pc-mihomo`, avoiding collisions with other proxy clients. macOS binaries require the pinned manual download.
+`build.rs` validates manifests and license metadata without requiring or downloading binaries. Runtime downloads support Windows x64 and Linux x64; macOS remains reserved. The selected kernel lives under the user's data directory in `kernel/<version>-<asset-id>` and uses the filename `pc-mihomo` (`.exe` on Windows), avoiding collisions with other clients. Legacy executable-relative kernel paths remain readable.
 
-Any future kernel downloader must stage files, validate size/hash, confirm `mihomo -v`, and switch atomically while retaining a known working version. Startup must not blindly follow upstream latest.
+The downloader stages files, validates the official asset size and SHA-256, verifies `-v`, and atomically commits a complete version directory. A fresh `-t` validation gates runtime activation. Startup/controller/TUN failure restores the previous version. Stable checks use `releases/latest`; Prebuild uses `Prerelease-Alpha` and compares resource IDs rather than its fixed tag. Automatic updates are opt-in, check after startup and every 24 hours, and serialize with profile/node/mode work. Linux refreshes the authorized root service's locked kernel when its recorded version differs from the selected kernel.
 
-Windows packages include the kernel, wintun, manifests, GPL texts, upstream NOTICE, corresponding source URL, and a statement of non-affiliation. PowerShell packaging validates resources before NSIS/ZIP creation. NSIS installs per-user without admin privileges and preserves user config/data on uninstall. Portable ZIP includes only distribution files under a `pure-clash` root directory.
+Windows packages contain the client, download manifests, and license/notice files. Wintun is downloaded from its official source and verified against pinned archive/file hashes. NSIS installs per-user without admin privileges and preserves downloaded user data on uninstall. Portable ZIP includes only distribution files under a `pure-clash` root directory.
 
-Linux deb/rpm installs into `/opt/pure-clash` with a `/usr/bin/pure-clash` symlink; AppImage uses an executable-relative layout. Full uninstall removes the root service before package files, while upgrades preserve service state. All formats include Geo data and licensing material.
+Linux deb/rpm installs into `/opt/pure-clash` with a `/usr/bin/pure-clash` symlink; AppImage uses an executable-relative metadata layout. Full uninstall removes the root service before package files, while upgrades preserve service state. All formats include download manifests and licensing material, without kernel or Geo database binaries.
 
 The release workflow runs on `v*` tags, rejects Cargo/tag version mismatches, builds Windows NSIS/portable ZIP and Linux deb/rpm/AppImage, then publishes assets. Only the publication job has write permissions. Pin and hash-check external AppImage tooling.
 
@@ -349,7 +349,7 @@ Real-subscription tests read `PURE_CLASH_TEST_SUBSCRIPTION_URL` locally and must
 
 Implemented: real data across the five main pages; subscriptions/local imports, update/delete/activation; mode and node selection with persistence; latency sorting; connections and traffic; managed system proxy and recovery; tray, singleton, autostart, and localization.
 
-Pending: rules/log/memory pages, profile history rollback, and kernel download/version rollback.
+Pending: rules/log/memory pages and profile history rollback. Kernel downloads and startup version rollback are implemented.
 
 ### Phase 3: Beta
 

@@ -8,7 +8,7 @@ use std::{
 use sha2::{Digest, Sha256};
 
 fn main() {
-    // 内核 manifest 是发行版本与随包文件名的唯一来源，避免运行时重复硬编码。
+    // 内核 manifest 提供历史基线版本与文件名，避免运行时重复硬编码。
     println!("cargo:rerun-if-changed=kernel");
     println!("cargo:rerun-if-changed=geodata");
     println!("cargo:rerun-if-changed=assets/windows/pure-clash.ico");
@@ -16,7 +16,7 @@ fn main() {
     let project_root =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo 应提供 CARGO_MANIFEST_DIR"));
     compile_windows_resources(&project_root);
-    validate_bundled_geodata(&project_root.join("geodata"));
+    validate_geodata_manifest(&project_root.join("geodata"));
     let manifest_path = find_kernel_manifest(&project_root.join("kernel"));
     let manifest_content = fs::read_to_string(&manifest_path).unwrap_or_else(|error| {
         panic!(
@@ -99,19 +99,7 @@ fn main() {
     {
         panic!("内置 Mihomo manifest binary 不是安全的文件名：{binary}");
     }
-    let binary_path = manifest_path
-        .parent()
-        .expect("内置 Mihomo manifest 应位于版本目录")
-        .join(binary);
-    if !binary_path.is_file() {
-        panic!(
-            "内置 Mihomo 文件不存在：{}（目标 {target_key} 需要 {binary}，请按 README 放置对应内核）",
-            binary_path.display()
-        )
-    }
-
-    // Windows 依赖 wintun 驱动才能启用 TUN，manifest 声明了它的版本与哈希来源，
-    // 编译期与内核一起校验存在性，避免发布缺少 TUN 能力的安装包。
+    // 源码与安装包不携带内核；只校验下载清单，不在构建阶段联网或要求二进制存在。
     if let Some(wintun) = target.get("wintun") {
         let file = wintun
             .get("file")
@@ -125,21 +113,15 @@ fn main() {
             .unwrap_or_else(|| {
                 panic!("内置 Mihomo manifest 目标 {target_key} 的 wintun.file 不是安全的文件名")
             });
-        let wintun_path = manifest_path.parent().expect("应位于版本目录").join(file);
-        if !wintun_path.is_file() {
-            panic!(
-                "内置 Mihomo 文件不存在：{}（目标 {target_key} 的 TUN 需要 {file}，请从 manifest 记录的官方地址获取）",
-                wintun_path.display()
-            )
-        }
+        let _ = file;
     }
 
     println!("cargo:rustc-env=PURE_CLASH_DEFAULT_MIHOMO_VERSION={version}");
     println!("cargo:rustc-env=PURE_CLASH_DEFAULT_MIHOMO_BINARY={binary}");
 }
 
-/// 构建期复核随包 Geo 数据，保证所有发行产物使用同一份受控快照。
-fn validate_bundled_geodata(root: &Path) {
+/// 构建只复核 Geo 下载清单与许可信息，不要求数据库文件存在。
+fn validate_geodata_manifest(root: &Path) {
     let manifest_path = root.join("manifest.json");
     let content = fs::read_to_string(&manifest_path).unwrap_or_else(|error| {
         panic!(
@@ -220,7 +202,8 @@ fn validate_bundled_geodata(root: &Path) {
             .and_then(serde_json::Value::as_str)
             .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .unwrap_or_else(|| panic!("Geo 数据 {name} 缺少有效 sha256"));
-        validate_file_digest(&root.join(name), expected_size, expected_hash, "Geo 数据");
+        // 数据文件在首次设置时按此清单下载，构建只校验元数据。
+        let _ = (expected_size, expected_hash);
     }
     if actual != expected {
         panic!("Geo 数据 manifest 必须且只能包含 {expected:?}，当前为 {actual:?}");

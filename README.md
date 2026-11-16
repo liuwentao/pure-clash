@@ -24,13 +24,14 @@ Currently available for Windows x64 and Linux x64 (Wayland / X11); macOS keeps d
 ## Features
 
 - **Kernel lifecycle** — configuration is validated with the same kernel build via `-t` before launch; child processes are guarded by a Job Object (Windows) or `PR_SET_PDEATHSIG` (Linux) so the kernel is reaped when the main process dies; manual start/stop plus full cleanup on tray quit
+- **Kernel downloads and updates** — source and packages contain no Mihomo executable or Wintun DLL; Settings downloads stable releases or Prebuild through GitHub, GH-Proxy, or ghfast, checks SHA-256 and the executable version, and can automatically update every 24 hours; failed startup restores the previous kernel
 - **Profiles and subscriptions** — a built-in default profile (DIRECT-only), URL subscriptions, and local YAML imports through the native file picker; every source passes structural pre-check and kernel `-t` validation before atomic storage and activation
-- **Offline Geo databases** — `GeoSite.dat`, `GeoIP.dat`, and `Country.mmdb` ship with every package, are restored locally without network access, and can be updated explicitly from Settings
+- **Geo database downloads** — `GeoSite.dat`, `GeoIP.dat`, and `Country.mmdb` are downloaded and hash-checked during first setup; subsequent configuration validation is offline, and Settings can explicitly update the complete snapshot
 - **Proxy groups and latency tests** — subscription nodes rendered per group, rule/global/direct mode switched live through the controller; per-node and per-group delay tests with threshold-based coloring
 - **Connections and live traffic** — a per-second controller snapshot poll showing process, target, chain, rule and per-connection up/down bytes; close a single connection or all of them; the overview shows live speed and active connections
 - **Custom inbound listeners** — configure additional `http`, `socks`, and `mixed` listeners alongside the default mixed port, each with an independent routing mode (`follow`, `rule`, `global`, `direct`), validated via `-t` and automatically reloaded on save
 - **System proxy** — Windows writes the current user's Internet Settings and broadcasts via WinINet; Linux supports GNOME/Cinnamon sessions through `gsettings` and KDE Plasma (5/6) through `kwriteconfig`/`kioslaverc` with independent HTTP and SOCKS endpoints. The user's original settings are saved atomically before enabling and restored on disable, core stop or crash recovery
-- **TUN mode** — Windows elevates only the kernel via UAC and uses the bundled wintun; Linux follows the Clash Verge Rev service model: a one-time `pkexec` installs a root systemd service, afterwards start/stop goes through a UID-restricted IPC and never asks for the password again; TUN automatically reverts when it does not take effect
+- **TUN mode** — Windows elevates only the kernel via UAC and uses the verified Wintun download; Linux follows the Clash Verge Rev service model: `pkexec` installs a root systemd service and refreshes its kernel when the selected version changes, while ordinary start/stop uses UID-restricted IPC; TUN automatically reverts when it does not take effect
 - **Desktop integration** — tray icon with live multi-language status, single-instance lock, close-to-tray, dark/light themes and a Chinese/English interface
 - **Minimal memory footprint** — the desktop client itself typically stays under 30 MB of memory (excluding the Mihomo kernel)
 
@@ -75,9 +76,9 @@ Actual verification has been completed in the following environments so far. Fee
 cargo run
 ```
 
-The pinned kernel is committed with the source (`kernel/<version>/pc-mihomo.exe` on Windows, `kernel/<version>/pc-mihomo` on Linux), so a fresh clone can launch the real kernel right away. macOS binaries are not committed; download the release listed in `kernel/<version>/manifest.json` under `targets.macos-*` and verify its SHA-256.
+Mihomo executables and `wintun.dll` are absent from both source and release packages. Building does not download or require them. On Windows/Linux x64, first launch opens Settings: choose Stable or Prebuild, select GitHub or a public download proxy, then click **Download / Update**. A successful first installation starts the kernel. Download failures leave the app open so you can select another source and retry. macOS online installation is not supported.
 
-On first launch the app initializes `config/` and `data/` on the current platform, including a DIRECT-only default config, a randomly generated controller secret, and an offline-verified copy of the bundled Geo databases.
+On first launch the app initializes `config/` and `data/` on the current platform, including a DIRECT-only default config and a randomly generated controller secret. **Download / Update** installs the kernel and the three required Geo databases before starting the kernel.
 
 ### Packages and releases
 
@@ -95,7 +96,7 @@ pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1 -PackageFo
 
 The output is `dist\pure-clash-<version>-windows-x64-portable.zip`. Extract it into a writable directory and run `pure-clash\pure-clash.exe`. Configuration, data, and logs are created alongside the executable; move the whole folder to keep them. Personal configuration is not included in the ZIP. Use `-PackageFormat All` to generate both formats from one build.
 
-Linux deb / rpm / AppImage and the Windows NSIS installer and portable ZIP are built automatically by GitHub Actions when a `v*` tag is pushed, then published to [Releases](https://github.com/prime-zt/pure-clash/releases); the tag version must match the Cargo package version. deb/rpm install into `/opt/pure-clash` and create a `/usr/bin/pure-clash` symlink, the AppImage runs as-is, and every package bundles the kernel, Geo databases, manifests, and license files.
+Linux deb / rpm / AppImage and the Windows NSIS installer and portable ZIP are built automatically by GitHub Actions when a `v*` tag is pushed, then published to [Releases](https://github.com/prime-zt/pure-clash/releases); the tag version must match the Cargo package version. deb/rpm install into `/opt/pure-clash` and create a `/usr/bin/pure-clash` symlink; AppImage runs as-is. Packages contain the client, download manifests, and license files. Kernels and Geo databases are downloaded separately into the user's data directory.
 
 ### Development checks
 
@@ -110,9 +111,11 @@ GPUI is still pre-1.0; this project pins Zed `v1.17.2` commit `c8e44cfa7bda9b2e2
 
 ## Kernel supply chain
 
-The bundled Mihomo kernel is version-pinned: `kernel/<version>/manifest.json` records the version, license and source URL, while `targets` keeps the download URL, size and SHA-256 per build target. Build scripts and the installer verify file presence and hashes; the app never blindly follows GitHub latest. The kernel is renamed `pc-mihomo` to avoid colliding with other proxy clients' processes.
+The app downloads official stable releases or `Prerelease-Alpha`, validates the release asset's SHA-256 and the executable's `-v` output, and stages each build in `data/kernel/<version>-<asset-id>` (under the XDG data directory on Linux). The executable is renamed `pc-mihomo` to avoid process-name collisions. New runtime configuration must pass the downloaded kernel's `-t` validation before activation; failed startup restores the previous kernel. Automatic updates are opt-in, check after startup and every 24 hours, and may require UAC/polkit for TUN. Old installations remain usable. The historical `kernel/<version>/manifest.json` retains the pinned Wintun source and hashes; binaries are not tracked or packaged.
 
-The Geo snapshot is pinned independently in `geodata/manifest.json` to one commit of the official MetaCubeX rule-data repository. Build and packaging checks verify all three files; Settings updates them as one rollback-capable snapshot and never performs a hidden download while validating a subscription.
+Initial Geo downloads use the commit, sizes, and SHA-256 hashes pinned in `geodata/manifest.json`. Explicit updates fix the official `release` commit and verify each file against its `.sha256sum` at that commit before committing the complete snapshot with rollback. Configuration validation never downloads resources. Source and packages contain only manifests and licensing information, not the three databases.
+
+GitHub is the default download source. GH-Proxy and ghfast are optional public third-party services; API requests try GitHub directly, then GH-Proxy when a proxy is selected. Changing the source requires no running kernel. Hashes detect corruption; a proxy that supplies both metadata and content is also a trust source. These services may change availability.
 
 ## Security model
 
@@ -145,6 +148,6 @@ This project itself contains a large amount of AI vibe coding, and the repositor
 
 This project is licensed under [GPL-3.0](LICENSE).
 
-The bundled Mihomo kernel is an unmodified upstream GPL-3.0 binary: the full license text (`LICENSE`) and third-party notice (`NOTICE.md`) live in `kernel/<version>/`, `manifest.json` records the matching source URL, and the installer ships these files together with the kernel. The bundled MetaCubeX rule data is also GPL-3.0; its pinned source, license, and notice live in `geodata/`.
+Downloaded Mihomo kernels are unmodified upstream GPL-3.0 binaries; each installed build records its license and corresponding source URL. Historical source and license metadata remain in `kernel/<version>/`. MetaCubeX rule data is also GPL-3.0; its pinned source, license, and notice live in `geodata/`. Neither kernel nor database binaries are included in source or packages.
 
 Pure Clash is not affiliated with MetaCubeX, and nothing here represents official endorsement from the upstream project. The name Pure Clash deliberately avoids the `mihomo` token that the upstream reserves.

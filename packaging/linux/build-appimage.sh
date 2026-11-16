@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 组装 AppImage：程序、随包内核与 Geo 数据整体进入 AppDir/usr/bin，保证
+# 组装 AppImage：程序与下载清单进入 AppDir/usr/bin，内核运行时下载，保证
 # 资源目录按可执行文件相对路径解析；共享库由 linuxdeploy 按需收集。
 #
 # 用法：build-appimage.sh <内核版本目录名> [包版本]
 # 前置：target/release/pure-clash 已构建；linuxdeploy 可执行文件在 PATH。
-# 内核版本目录名用于定位随包内核；AppImage 文件名使用包版本（缺省时读
+# 第一个参数保留以兼容现有调用，不再打包内核；AppImage 文件名使用包版本（缺省时读
 # 取 Cargo 元数据）。
 set -euo pipefail
 
@@ -23,24 +23,15 @@ if [ ! -x "$binary" ]; then
     echo "缺少 release 可执行文件：$binary" >&2
     exit 1
 fi
-if [ ! -x "$root/kernel/$kernel_version/pc-mihomo" ]; then
-    echo "内核文件缺失：$root/kernel/$kernel_version/pc-mihomo" >&2
-    exit 1
-fi
 
 rm -rf "$appdir"
-mkdir -p "$appdir/usr/bin/kernel/$kernel_version" \
-    "$appdir/usr/bin/geodata" \
+mkdir -p "$appdir/usr/bin/geodata" \
     "$appdir/usr/share/applications" \
     "$appdir/usr/share/icons/hicolor/64x64/apps"
 
 install -m 755 "$binary" "$appdir/usr/bin/pure-clash"
-install -m 755 "$root/kernel/$kernel_version/pc-mihomo" "$appdir/usr/bin/kernel/$kernel_version/pc-mihomo"
-install -m 644 "$root/kernel/$kernel_version/LICENSE" "$root/kernel/$kernel_version/NOTICE.md" \
-    "$root/kernel/$kernel_version/manifest.json" "$appdir/usr/bin/kernel/$kernel_version/"
-# Geo 数据、受控清单与许可证作为只读资源随包分发，首次启动再复制到用户目录。
-install -m 644 "$root/geodata/GeoSite.dat" "$root/geodata/GeoIP.dat" \
-    "$root/geodata/Country.mmdb" "$root/geodata/manifest.json" \
+# 仅分发 Geo 下载清单与许可证，数据库在首次设置时下载。
+install -m 644 "$root/geodata/manifest.json" \
     "$root/geodata/LICENSE" "$root/geodata/NOTICE.md" "$appdir/usr/bin/geodata/"
 install -m 644 "$root/packaging/linux/pure-clash.desktop" "$appdir/usr/share/applications/"
 install -m 644 "$root/packaging/linux/pure-clash.png" \

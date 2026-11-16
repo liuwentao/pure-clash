@@ -81,91 +81,13 @@ try {
         throw "Windows 应用图标不存在：$appIcon"
     }
 
-    # 随包内核 manifest 是版本唯一来源；多个候选会导致默认版本不明确并中止打包。
-    $kernelRoot = Join-Path $projectRoot "kernel"
-    $kernelManifests = @(Get-ChildItem -LiteralPath $kernelRoot -Directory | ForEach-Object {
-        $candidate = Join-Path $_.FullName "manifest.json"
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            $candidate
-        }
-    })
-    if ($kernelManifests.Count -ne 1) {
-        throw "kernel 目录必须且只能包含一个随包内核 manifest.json，当前找到 $($kernelManifests.Count) 个。"
-    }
-
-    $kernelManifest = $kernelManifests[0]
-    $kernelMetadata = Get-Content -Raw -LiteralPath $kernelManifest | ConvertFrom-Json
-    $kernelVersion = [string]$kernelMetadata.version
-    if ([string]::IsNullOrWhiteSpace($kernelVersion)) {
-        throw "内核 manifest 缺少有效 version：$kernelManifest"
-    }
-    $kernelDir = Split-Path -Parent $kernelManifest
-    if ((Split-Path -Leaf $kernelDir) -ne $kernelVersion) {
-        throw "内核目录名与 manifest version 不一致：$kernelDir"
-    }
-
-    # manifest 的 targets 按编译目标记录各平台发行条目；安装器只消费 windows-amd64。
-    $windowsTarget = $kernelMetadata.targets.'windows-amd64'
-    if (-not $windowsTarget) {
-        throw "内核 manifest 缺少 windows-amd64 发行目标：$kernelManifest"
-    }
-
-    # 随包文件名由 manifest 统一控制；Windows 当前产品名固定为 pc-mihomo.exe。
-    $kernelBinaryName = [string]$windowsTarget.binary
-    if ($kernelBinaryName -ne "pc-mihomo.exe") {
-        throw "内核 manifest binary 必须为 pc-mihomo.exe，当前为：$kernelBinaryName"
-    }
-    $kernelExe = Join-Path $kernelDir $kernelBinaryName
-    $kernelLicense = Join-Path $kernelDir "LICENSE"
-    $kernelNotice = Join-Path $kernelDir "NOTICE.md"
-    foreach ($requiredKernelFile in @($kernelExe, $kernelLicense, $kernelNotice, $kernelManifest)) {
-        if (-not (Test-Path -LiteralPath $requiredKernelFile -PathType Leaf)) {
-            throw "内置 Mihomo 文件不存在：$requiredKernelFile"
-        }
-    }
-
-    # 打包前按受控清单复核供应链信息，避免误把错误版本或损坏文件发布出去。
-    if ($windowsTarget.platform -ne "windows" -or
-        $windowsTarget.architecture -ne "amd64" -or
-        $windowsTarget.build -ne "compatible") {
-        throw "内核 manifest 与 Windows amd64-compatible 发行目标不一致。"
-    }
-    if ((Get-Item -LiteralPath $kernelExe).Length -ne $windowsTarget.binary_size) {
-        throw "内置 Mihomo 文件大小与 manifest 不一致。"
-    }
-    $kernelHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $kernelExe).Hash.ToLowerInvariant()
-    if ($kernelHash -ne $windowsTarget.binary_sha256) {
-        throw "内置 Mihomo SHA-256 与 manifest 不一致。"
-    }
-    $licenseHash = Get-CanonicalUtf8TextSha256 -LiteralPath $kernelLicense
-    if ($licenseHash -ne $kernelMetadata.license_sha256) {
-        throw "Mihomo LICENSE SHA-256 与 manifest 不一致。"
-    }
-
-    # wintun.dll 是 Windows 目标启用 TUN 的必要驱动，manifest 锁定来源与哈希。
-    $wintunSource = $null
-    if ($windowsTarget.wintun) {
-        $wintunName = [string]$windowsTarget.wintun.file
-        $wintunSource = Join-Path $kernelDir $wintunName
-        if (-not (Test-Path -LiteralPath $wintunSource -PathType Leaf)) {
-            throw "内置 wintun 驱动不存在：$wintunSource"
-        }
-        if ((Get-Item -LiteralPath $wintunSource).Length -ne $windowsTarget.wintun.file_size) {
-            throw "内置 wintun 驱动大小与 manifest 不一致。"
-        }
-        $wintunHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wintunSource).Hash.ToLowerInvariant()
-        if ($wintunHash -ne $windowsTarget.wintun.file_sha256) {
-            throw "内置 wintun 驱动 SHA-256 与 manifest 不一致。"
-        }
-    }
-
     # 项目自身的 GPL-3.0 许可文本随安装包分发，与内核许可证分别履行义务。
     $projectLicense = Join-Path $projectRoot "LICENSE"
     if (-not (Test-Path -LiteralPath $projectLicense -PathType Leaf)) {
         throw "未找到项目 LICENSE 文件：$projectLicense"
     }
 
-    # Geo 数据使用独立 manifest 锁定同一官方提交；打包前再做一次文件集合与哈希复核。
+    # 仅携带下载清单与许可信息，三份数据库由应用首次设置时校验下载。
     $geodataRoot = Join-Path $projectRoot "geodata"
     $geodataManifest = Join-Path $geodataRoot "manifest.json"
     $geodataLicense = Join-Path $geodataRoot "LICENSE"
@@ -189,38 +111,16 @@ try {
         @(Compare-Object ($expectedGeoNames | Sort-Object) ($actualGeoNames | Sort-Object)).Count -ne 0) {
         throw "Geo 数据 manifest 必须且只能包含三份基础数据。"
     }
-    $geodataPayloads = @()
-    foreach ($geoEntry in $geodataMetadata.files) {
-        $geoName = [string]$geoEntry.name
-        if ([IO.Path]::GetFileName($geoName) -ne $geoName -or $geoName -notmatch '^[A-Za-z0-9._-]+$') {
-            throw "Geo 数据 manifest 包含不安全的文件名：$geoName"
-        }
-        $geoSource = Join-Path $geodataRoot $geoName
-        if (-not (Test-Path -LiteralPath $geoSource -PathType Leaf)) {
-            throw "内置 Geo 数据不存在：$geoSource"
-        }
-        if ((Get-Item -LiteralPath $geoSource).Length -ne [long]$geoEntry.size) {
-            throw "内置 Geo 数据大小与 manifest 不一致：$geoName"
-        }
-        $geoHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $geoSource).Hash.ToLowerInvariant()
-        if ($geoHash -ne [string]$geoEntry.sha256) {
-            throw "内置 Geo 数据 SHA-256 与 manifest 不一致：$geoName"
-        }
-        $geodataPayloads += $geoSource
-    }
     $geodataLicenseHash = Get-CanonicalUtf8TextSha256 -LiteralPath $geodataLicense
     if ($geodataLicenseHash -ne [string]$geodataMetadata.license_sha256) {
         throw "Geo 数据 LICENSE SHA-256 与 manifest 不一致。"
     }
-    $geodataFiles = @($geodataManifest, $geodataLicense, $geodataNotice) + $geodataPayloads
+    $geodataFiles = @($geodataManifest, $geodataLicense, $geodataNotice)
 
     $distDir = Join-Path $projectRoot "dist"
     New-Item -ItemType Directory -Force -Path $distDir | Out-Null
     $installerOutput = Join-Path $distDir "pure-clash-$version-windows-x64-setup.exe"
-    $packagedFiles = @($appExe, $kernelExe, $kernelLicense, $kernelNotice, $kernelManifest, $projectLicense) + $geodataFiles
-    if ($wintunSource) {
-        $packagedFiles += $wintunSource
-    }
+    $packagedFiles = @($appExe, $projectLicense) + $geodataFiles
     $installSizeBytes = ($packagedFiles |
         ForEach-Object { (Get-Item -LiteralPath $_).Length } |
         Measure-Object -Sum).Sum
@@ -233,13 +133,6 @@ try {
         $zipEntries = [ordered]@{
             "pure-clash/pure-clash.exe" = $appExe
             "pure-clash/LICENSE" = $projectLicense
-        }
-        $kernelFiles = @($kernelExe, $kernelLicense, $kernelNotice, $kernelManifest)
-        if ($wintunSource) {
-            $kernelFiles += $wintunSource
-        }
-        foreach ($source in $kernelFiles) {
-            $zipEntries["pure-clash/kernel/$kernelVersion/$([IO.Path]::GetFileName($source))"] = $source
         }
         foreach ($source in $geodataFiles) {
             $zipEntries["pure-clash/geodata/$([IO.Path]::GetFileName($source))"] = $source
@@ -302,23 +195,12 @@ try {
         "/DAPP_VERSION_NUMERIC=$numericVersion"
         "/DAPP_EXE_SOURCE=$appExe"
         "/DAPP_ICON_SOURCE=$appIcon"
-        "/DKERNEL_VERSION=$kernelVersion"
-        "/DKERNEL_BINARY_NAME=$kernelBinaryName"
-        "/DKERNEL_EXE_SOURCE=$kernelExe"
-        "/DKERNEL_LICENSE_SOURCE=$kernelLicense"
-        "/DKERNEL_NOTICE_SOURCE=$kernelNotice"
-        "/DKERNEL_MANIFEST_SOURCE=$kernelManifest"
         "/DGEODATA_ROOT=$geodataRoot"
         "/DPROJECT_LICENSE_SOURCE=$projectLicense"
         "/DINSTALLER_OUTPUT=$installerOutput"
         "/DINSTALL_SIZE_KB=$installSizeKb"
         $nsisScript
     )
-    # wintun 驱动随内核打包；NSIS 脚本按 define 是否存在决定是否安装。
-    if ($wintunSource) {
-        $nsisArguments += "/DKERNEL_WINTUN_SOURCE=$wintunSource"
-    }
-
     & $makensis @nsisArguments
     if ($LASTEXITCODE -ne 0) {
         throw "NSIS 安装包编译失败。"

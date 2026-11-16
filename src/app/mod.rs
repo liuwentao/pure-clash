@@ -59,6 +59,7 @@ mod about;
 mod connections;
 mod frame;
 mod header;
+mod kernel_update;
 mod overview;
 mod profiles;
 mod proxies;
@@ -232,6 +233,12 @@ pub(crate) struct PureClash {
     paths: AppPaths,
     /// 仅表示配置所选版本的内核文件存在，不代表 Mihomo 进程已经运行。
     kernel_available: bool,
+    kernel_update_busy: bool,
+    kernel_update_status: Option<SharedString>,
+    kernel_latest: Option<crate::kernel::update::ReleaseInfo>,
+    /// 直到新 controller 就绪才结束切换事务，启动失败时恢复旧版本。
+    kernel_rollback: Option<String>,
+    kernel_update_last_attempt: Option<std::time::Instant>,
     /// 当前由应用持有的真实 Mihomo 子进程，释放时会自动停止。
     mihomo_process: Option<MihomoProcess>,
     core_state: CoreState,
@@ -403,18 +410,23 @@ impl PureClash {
             config.active_profile = None;
         }
         let active_profile = config.active_profile.clone();
-        let runtime_error = profile::sync_runtime_file(
-            &paths,
-            baseline.as_ref(),
-            &config.mihomo_version,
-            active_profile.as_deref(),
-        )
-        .err()
-        .map(|error| {
-            log_error!("core", "同步运行时配置失败：{error:#}");
-            concise_error(&format!("{error:#}"), 200)
-        });
-        let runtime_ready = runtime_error.is_none();
+        let resources_ready = kernel_available && !geodata_info.revision.is_empty();
+        let runtime_error = if resources_ready {
+            profile::sync_runtime_file(
+                &paths,
+                baseline.as_ref(),
+                &config.mihomo_version,
+                active_profile.as_deref(),
+            )
+            .err()
+            .map(|error| {
+                log_error!("core", "同步运行时配置失败：{error:#}");
+                concise_error(&format!("{error:#}"), 200)
+            })
+        } else {
+            None
+        };
+        let runtime_ready = resources_ready && runtime_error.is_none();
 
         // 上次异常退出可能遗留系统代理托管，启动时按记录恢复用户原有设置。
         if let Some(snapshot) = load_system_proxy_state(&paths) {
@@ -453,10 +465,19 @@ impl PureClash {
             .is_some_and(|baseline| baseline.tun_enable);
 
         let mut app = Self {
-            page: Page::Overview,
+            page: if resources_ready {
+                Page::Overview
+            } else {
+                Page::Settings
+            },
             config,
             paths,
             kernel_available,
+            kernel_update_busy: false,
+            kernel_update_status: None,
+            kernel_latest: None,
+            kernel_rollback: None,
+            kernel_update_last_attempt: None,
             mihomo_process: None,
             core_state: CoreState::Stopped,
             core_start_generation: 0,
@@ -529,6 +550,7 @@ impl PureClash {
         app.spawn_connection_poll(cx);
         app.spawn_proxy_poll(cx);
         app.spawn_profile_update_scheduler(cx);
+        app.spawn_kernel_update_scheduler(cx);
         app
     }
 
@@ -550,7 +572,7 @@ impl PureClash {
 
     /// 内核是否允许接受启停操作。
     fn core_operable(&self) -> bool {
-        self.core_state != CoreState::Starting
+        self.core_state != CoreState::Starting && !self.kernel_update_busy
     }
 
     /// 内核已经运行或正在异步启动；替换 runtime/Geo 数据时两种状态都必须重启。
@@ -681,18 +703,19 @@ impl PureClash {
     /// 更新模块先固定官方 release 分支提交，再完整下载并原子提交同一快照。
     /// 运行中的 Mihomo 会在成功切换后重启，确保新规则库立即生效。
     fn update_geodata(&mut self, cx: &mut Context<Self>) {
-        if self.geodata_updating {
+        if self.geodata_updating || self.kernel_update_busy || self.kernel_rollback.is_some() {
             return;
         }
         self.geodata_updating = true;
         self.geodata_status = None;
         let paths = self.paths.clone();
+        let source = self.config.kernel_download_source;
         cx.notify();
 
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { crate::mihomo::geodata::update_from_official(&paths) })
+                .spawn(async move { crate::mihomo::geodata::update_from_official(&paths, source) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.geodata_updating = false;
@@ -848,6 +871,7 @@ impl PureClash {
             log_info!("core", "用户请求停止内核");
             // 系统代理指向本机内核端口，停内核前先恢复用户原有代理设置。
             self.disable_system_proxy();
+            self.kernel_rollback = None;
             self.stop_core();
             // TUN 由内核承载，内核停止即失效；同步回退避免界面与下次启动
             // 仍显示/启用已停止的 TUN。
@@ -870,6 +894,18 @@ impl PureClash {
         if !self.core_operable() || self.mihomo_process.is_some() {
             return;
         }
+        if !self.kernel_available {
+            self.page = Page::Settings;
+            self.kernel_update_status = Some(tr("kernel.missing"));
+            cx.notify();
+            return;
+        }
+        if self.geodata_info.revision.is_empty() {
+            self.page = Page::Settings;
+            self.kernel_update_status = Some(tr("kernel.resources_missing"));
+            cx.notify();
+            return;
+        }
         let reservation = if let Some(baseline) = self.baseline.as_mut() {
             match profile::prepare_subscription_direct_startup(
                 &self.paths,
@@ -879,6 +915,9 @@ impl PureClash {
             ) {
                 Ok(reservation) => reservation,
                 Err(error) => {
+                    if self.rollback_kernel_update(&error, cx) {
+                        return;
+                    }
                     log_error!("core", "准备订阅直连入口失败：{error:#}");
                     self.mihomo_error = Some(
                         t!(
@@ -1002,6 +1041,9 @@ impl PureClash {
                 self.spawn_readiness_probe(generation, cx);
             }
             Err(error) => {
+                if self.rollback_kernel_update(&error, cx) {
+                    return;
+                }
                 self.mihomo_process = None;
                 self.core_state = CoreState::Stopped;
                 self.tun_state = SwitchState::Off;
@@ -1119,6 +1161,7 @@ impl PureClash {
                     // 只有 controller 明确返回开启，界面和托盘才显示 TUN 已生效。
                     log_info!("tun", "controller 确认 TUN 已生效");
                     this.tun_state = SwitchState::On;
+                    this.kernel_rollback = None;
                     this.verify_subscription_direct(generation, cx);
                     cx.notify();
                     return;
@@ -1126,6 +1169,7 @@ impl PureClash {
                 if !this.tun_configured {
                     return;
                 }
+                if this.rollback_kernel_update(&error, cx) { return; }
                 // 即使回退文件写入失败，也结束过渡态，允许用户重试。
                 this.tun_state = SwitchState::Off;
                 // 回退事务会校验并原子写入关闭 TUN 的配置，运行中自动重启内核。
@@ -1221,6 +1265,9 @@ impl PureClash {
                 match result {
                     Ok(()) => {
                         log_info!("core", "controller 就绪，内核进入运行状态");
+                        if !this.tun_configured {
+                            this.kernel_rollback = None;
+                        }
                         this.core_state = CoreState::Running;
                         this.mihomo_error = None;
                         this.fetch_runtime_state(cx);
@@ -1228,6 +1275,9 @@ impl PureClash {
                         this.restore_system_proxy_if_configured();
                     }
                     Err(error) => {
+                        if this.rollback_kernel_update(&error, cx) {
+                            return;
+                        }
                         // 内核未能就绪：先恢复代理设置再回收进程，避免流量断在死端口上。
                         log_error!("core", "等待 Mihomo controller 就绪超时：{error:#}");
                         this.disable_system_proxy();
@@ -1424,6 +1474,9 @@ impl PureClash {
                                     }
                                     this.clear_live_traffic();
                                 } else {
+                                    if this.rollback_kernel_update(&error, cx) {
+                                        return;
+                                    }
                                     log_error!(
                                         "core",
                                         "受管内核进程意外退出，自动恢复系统代理并停止内核"
@@ -1922,6 +1975,9 @@ impl PureClash {
     /// 强制进程名开关：app.json 先行持久化，基线与 runtime 走同一 `-t` 事务；
     /// 运行中的内核经 controller 热切换，不重启进程、不断开存量连接。
     fn toggle_find_process(&mut self, cx: &mut Context<Self>) {
+        if self.kernel_update_busy || self.kernel_rollback.is_some() {
+            return;
+        }
         let Some(previous_baseline) = self.baseline.clone() else {
             self.integration_error = Some(t!("app.baseline_missing").into_owned());
             cx.notify();
@@ -2430,7 +2486,8 @@ impl PureClash {
     /// 配置页动作互斥锁：模式/节点切换与恢复、手动忙态、行内编辑或自动更新进行中时，
     /// 暂停其他会修改配置列表 / profile 文件的操作，避免并发写与下标漂移。
     fn profile_actions_locked(&self) -> bool {
-        self.core_state == CoreState::Starting
+        self.kernel_update_busy
+            || self.core_state == CoreState::Starting
             || self.tun_state == SwitchState::Starting
             || self.mode_switching
             || self.node_switching

@@ -5,9 +5,8 @@ edition = "2024"
 description = "A lightweight Mihomo desktop client built with Rust and Zed GPUI"
 license = "GPL-3.0"
 
-# Linux 发行包布局：程序与随包内核整体放在 /opt/pure-clash，保证内核目录
-# 相对可执行文件解析；/usr/bin 软链由维护脚本创建。随包内核版本目录升级时
-# 需同步更新两段 assets 中的 kernel/1.19.30 路径（唯一来源仍是 manifest）。
+# Linux 发行包只携带客户端与下载清单，内核下载到用户数据目录。
+# /usr/bin 软链由维护脚本创建。
 [package.metadata.deb]
 maintainer = "Ztion <322723664+prime-zt@users.noreply.github.com>"
 copyright = "2026 Ztion"
@@ -21,13 +20,6 @@ groups, connections and live traffic, and safely controls a standalone \
 Mihomo kernel with system proxy and TUN support."""
 assets = [
     ["target/release/pure-clash", "opt/pure-clash/", "755"],
-    ["kernel/1.19.30/pc-mihomo", "opt/pure-clash/kernel/1.19.30/", "755"],
-    ["kernel/1.19.30/LICENSE", "opt/pure-clash/kernel/1.19.30/", "644"],
-    ["kernel/1.19.30/NOTICE.md", "opt/pure-clash/kernel/1.19.30/", "644"],
-    ["kernel/1.19.30/manifest.json", "opt/pure-clash/kernel/1.19.30/", "644"],
-    ["geodata/GeoSite.dat", "opt/pure-clash/geodata/", "644"],
-    ["geodata/GeoIP.dat", "opt/pure-clash/geodata/", "644"],
-    ["geodata/Country.mmdb", "opt/pure-clash/geodata/", "644"],
     ["geodata/manifest.json", "opt/pure-clash/geodata/", "644"],
     ["geodata/LICENSE", "opt/pure-clash/geodata/", "644"],
     ["geodata/NOTICE.md", "opt/pure-clash/geodata/", "644"],
@@ -44,13 +36,6 @@ pre_uninstall_script = "packaging/linux/rpm/pre-uninstall.sh"
 post_uninstall_script = "packaging/linux/rpm/post-uninstall.sh"
 assets = [
     { source = "target/release/pure-clash", dest = "/opt/pure-clash/pure-clash", mode = "755" },
-    { source = "kernel/1.19.30/pc-mihomo", dest = "/opt/pure-clash/kernel/1.19.30/pc-mihomo", mode = "755" },
-    { source = "kernel/1.19.30/LICENSE", dest = "/opt/pure-clash/kernel/1.19.30/LICENSE", mode = "644" },
-    { source = "kernel/1.19.30/NOTICE.md", dest = "/opt/pure-clash/kernel/1.19.30/NOTICE.md", mode = "644" },
-    { source = "kernel/1.19.30/manifest.json", dest = "/opt/pure-clash/kernel/1.19.30/manifest.json", mode = "644" },
-    { source = "geodata/GeoSite.dat", dest = "/opt/pure-clash/geodata/GeoSite.dat", mode = "644" },
-    { source = "geodata/GeoIP.dat", dest = "/opt/pure-clash/geodata/GeoIP.dat", mode = "644" },
-    { source = "geodata/Country.mmdb", dest = "/opt/pure-clash/geodata/Country.mmdb", mode = "644" },
     { source = "geodata/manifest.json", dest = "/opt/pure-clash/geodata/manifest.json", mode = "644" },
     { source = "geodata/LICENSE", dest = "/opt/pure-clash/geodata/LICENSE", mode = "644" },
     { source = "geodata/NOTICE.md", dest = "/opt/pure-clash/geodata/NOTICE.md", mode = "644" },
@@ -87,6 +72,9 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 # 订阅下载与 controller REST 调用；rustls TLS，阻塞式跑在 GPUI 后台线程。
 ureq = { version = "2.10", features = ["json", "socks-proxy"] }
+# 官方内核使用 gzip（Linux）和 ZIP（Windows）分发，仅启用解压所需功能。
+flate2 = "1.0"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 # 生成配置文件随机 secret 与订阅 profile 标识。
 uuid = { version = "1.0", features = ["v4"] }
 # 文本输入组件的字素边界处理（与 gpui 官方 input 示例一致）。

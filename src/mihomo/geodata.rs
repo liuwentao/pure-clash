@@ -1,7 +1,7 @@
 //! Mihomo Geo 数据的随包安装、完整性记录与显式在线更新。
 //!
-//! 三份基础数据作为安装资源随应用发布，首次启动复制到 Mihomo 用户数据目录。
-//! 配置校验只执行离线完整性检查，不再隐式联网；用户可在设置页显式更新到
+//! 三份基础数据在首次设置时下载到 Mihomo 用户数据目录。
+//! 配置校验只执行离线完整性检查，不隐式联网；用户可在设置页显式更新到
 //! MetaCubeX 官方 `release` 分支的同一提交快照。
 
 use std::{
@@ -10,13 +10,14 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::Mutex,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::kernel::update::{DownloadSource, fetch, fetch_metadata};
 use crate::platform::{AppPaths, file::atomic_write};
 
 const MANIFEST_FILE: &str = "manifest.json";
@@ -93,7 +94,7 @@ struct CompletedFile {
 }
 
 /// 设置页展示的当前 Geo 数据信息。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct GeodataInfo {
     /// 当前官方 Git commit SHA。
     pub(crate) revision: String,
@@ -130,7 +131,7 @@ struct PreparedFile {
     sha256: String,
 }
 
-/// 首次启动安装随包 Geo 数据；已有完整在线更新时不回退覆盖。
+/// 离线校验用户数据并兼容旧版安装资源；缺失时由设置页显式下载。
 pub(crate) fn ensure_bundled(paths: &AppPaths) -> Result<GeodataInfo> {
     let _guard = GEODATA_LOCK
         .lock()
@@ -170,20 +171,25 @@ fn ensure_bundled_locked(paths: &AppPaths) -> Result<GeodataInfo> {
 }
 
 /// 显式更新到 MetaCubeX 官方 release 分支的同一提交快照。
-pub(crate) fn update_from_official(paths: &AppPaths) -> Result<UpdateOutcome> {
+pub(crate) fn update_from_official(
+    paths: &AppPaths,
+    source: DownloadSource,
+) -> Result<UpdateOutcome> {
     let _guard = GEODATA_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let current = ensure_bundled_locked(paths)?;
     let manifest = read_bundled_manifest(paths)?;
-    let latest = fetch_release_commit()?;
-    if latest == current.revision {
-        return Ok(UpdateOutcome::UpToDate(current));
+    let state = read_completion_state(&paths.mihomo_data_dir);
+    let latest = fetch_release_commit(source)?;
+    if latest == state.source_commit
+        && state_is_complete(&paths.mihomo_data_dir, &state, &manifest.files)
+    {
+        return Ok(UpdateOutcome::UpToDate(info_from_state(&state)));
     }
 
     let mut prepared = Vec::with_capacity(manifest.files.len());
     for file in &manifest.files {
-        let bytes = download_at_commit(&latest, file)?;
+        let bytes = download_at_commit(&latest, file, source, false)?;
         let sha256 = sha256_bytes(&bytes);
         prepared.push(PreparedFile {
             name: file.name.clone(),
@@ -196,6 +202,29 @@ pub(crate) fn update_from_official(paths: &AppPaths) -> Result<UpdateOutcome> {
     Ok(UpdateOutcome::Updated(info_from_state(&state)))
 }
 
+/// 首次安装使用源码清单锁定的快照与哈希，公共代理不能改变预期文件内容。
+pub(crate) fn ensure_downloaded(paths: &AppPaths, source: DownloadSource) -> Result<GeodataInfo> {
+    let _guard = GEODATA_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Ok(current) = ensure_bundled_locked(paths) {
+        return Ok(current);
+    }
+    let manifest = read_bundled_manifest(paths)?;
+    let mut prepared = Vec::new();
+    for file in &manifest.files {
+        let bytes = download_at_commit(&manifest.source_commit, file, source, true)?;
+        prepared.push(PreparedFile {
+            name: file.name.clone(),
+            sha256: sha256_bytes(&bytes),
+            bytes,
+        });
+    }
+    let state = state_for_files("official-update", &manifest.source_commit, &prepared);
+    commit_files(paths, &prepared, &state)?;
+    Ok(info_from_state(&state))
+}
+
 /// 每次执行内核配置校验前离线复核整套 Geo 数据。
 ///
 /// 不解析 YAML 猜测实际依赖，避免少见规则写法漏检后触发 Mihomo 自行下载。
@@ -204,56 +233,50 @@ pub(super) fn prepare_for_config(paths: &AppPaths, _config_file: &Path) -> Resul
     Ok(())
 }
 
-fn fetch_release_commit() -> Result<String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .build();
-    let response = agent
-        .get(RELEASE_BRANCH_API)
-        .set("User-Agent", "pure-clash/geodata-updater")
-        .call()
-        .map_err(|error| anyhow!("{error}"))
-        .context("无法查询官方 Geo 数据版本")?;
-    let branch: BranchResponse = response
-        .into_json()
-        .context("官方 Geo 数据版本响应格式无效")?;
+fn fetch_release_commit(source: DownloadSource) -> Result<String> {
+    let bytes = fetch_metadata(RELEASE_BRANCH_API, source).context("无法查询官方 Geo 数据版本")?;
+    let branch: BranchResponse =
+        serde_json::from_slice(&bytes).context("官方 Geo 数据版本响应格式无效")?;
     validate_commit(&branch.commit.sha)?;
     Ok(branch.commit.sha.to_ascii_lowercase())
 }
 
-fn download_at_commit(commit: &str, file: &ManifestFile) -> Result<Vec<u8>> {
+fn download_at_commit(
+    commit: &str,
+    file: &ManifestFile,
+    source: DownloadSource,
+    pinned: bool,
+) -> Result<Vec<u8>> {
     validate_commit(commit)?;
     if !safe_single_name(&file.upstream_path) {
         bail!("Geo 数据清单包含不安全的上游路径");
     }
     let url = format!("{RAW_BASE_URL}/{commit}/{}", file.upstream_path);
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout(Duration::from_secs(120))
-        .build();
-    let response = agent
-        .get(&url)
-        .set("User-Agent", "pure-clash/geodata-updater")
-        .call()
-        .map_err(|error| anyhow!("{error}"))
+    let hash = if pinned {
+        file.sha256.clone()
+    } else {
+        let checksum = fetch(&format!("{url}.sha256sum"), source, 4096)?;
+        parse_checksum(&checksum, &file.upstream_path)?
+    };
+    let bytes = fetch(&url, source, MAX_GEODATA_BYTES)
         .with_context(|| format!("无法下载官方 Geo 数据 {}", file.name))?;
-    if response
-        .header("Content-Length")
-        .and_then(|length| length.parse::<u64>().ok())
-        .is_some_and(|length| length == 0 || length > MAX_GEODATA_BYTES)
-    {
-        bail!("官方 Geo 数据 {} 响应大小无效", file.name);
-    }
-
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(MAX_GEODATA_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("下载官方 Geo 数据 {} 中断", file.name))?;
-    validate_payload(&file.name, &bytes, None, None)?;
+    validate_payload(&file.name, &bytes, pinned.then_some(file.size), Some(&hash))?;
     Ok(bytes)
+}
+
+fn parse_checksum(bytes: &[u8], expected_name: &str) -> Result<String> {
+    let text = std::str::from_utf8(bytes).context("Geo 数据校验信息不是 UTF-8")?;
+    let mut parts = text.split_whitespace();
+    let hash = parts.next().context("Geo 数据缺少 SHA-256")?;
+    let name = parts
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('*')
+        .trim_start_matches("./");
+    if !valid_sha256(hash) || name != expected_name || parts.next().is_some() {
+        bail!("Geo 数据 SHA-256 或文件名无效");
+    }
+    Ok(hash.to_ascii_lowercase())
 }
 
 fn commit_files(
@@ -612,6 +635,36 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn checksum_requires_hash_and_matching_filename() {
+        let hash = "a".repeat(64);
+        assert_eq!(
+            parse_checksum(format!("{hash}  geosite.dat\n").as_bytes(), "geosite.dat").unwrap(),
+            hash
+        );
+        assert!(parse_checksum(format!("{hash}  geoip.dat").as_bytes(), "geosite.dat").is_err());
+        assert!(parse_checksum(b"<html>error</html>", "geosite.dat").is_err());
+        assert!(parse_checksum(hash.as_bytes(), "geosite.dat").is_err());
+        assert!(validate_payload("GeoSite.dat", b"abc", Some(3), Some(&hash)).is_err());
+    }
+
+    #[test]
+    fn missing_databases_require_explicit_download() {
+        let root = test_dir("missing");
+        let files = [
+            ("GeoSite.dat", "geosite.dat", b"site".as_slice()),
+            ("GeoIP.dat", "geoip.dat", b"ip".as_slice()),
+            ("Country.mmdb", "country.mmdb", b"country".as_slice()),
+        ];
+        write_test_bundle(&root, &"1".repeat(40), &files);
+        fs::remove_file(root.join("geodata/GeoIP.dat")).unwrap();
+        let paths = AppPaths::portable(&root);
+        assert!(ensure_bundled(&paths).is_err());
+        assert!(!paths.mihomo_data_dir.join(COMPLETION_FILE).exists());
+        assert!(!paths.mihomo_data_dir.join("GeoSite.dat").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

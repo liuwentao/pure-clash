@@ -19,13 +19,14 @@ Pure Clash 通过简洁、快速的原生界面管理配置订阅、代理分组
 ## 功能
 
 - **内核生命周期**：启动前使用同一版本内核的 `-t` 校验配置；Windows 使用 Job Object、Linux 使用 `PR_SET_PDEATHSIG` 守护子进程，主进程退出时回收内核；支持手动启停，通过托盘退出时完整清理。
+- **内核下载与更新**：源码和发行包不含 Mihomo 与 Wintun 二进制；设置页支持正式发布 / Prebuild、GitHub 直连 / GH-Proxy / ghfast 下载，校验 SHA-256 和内核版本；可选每 24 小时自动更新，启动失败恢复旧版本。
 - **配置与订阅**：提供仅含 DIRECT 的内置默认配置，支持 URL 订阅和原生文件选择器导入本地 YAML；所有来源均通过结构预检和内核 `-t` 校验后，再原子保存并激活。
-- **离线 Geo 数据库**：安装包包含 `GeoSite.dat`、`GeoIP.dat` 和 `Country.mmdb`，可在不联网时从随包资源恢复，也可在设置页手动更新。
+- **Geo 数据库下载**：首次设置时下载并校验 `GeoSite.dat`、`GeoIP.dat` 和 `Country.mmdb`；之后的配置校验离线执行，设置页可显式更新完整快照。
 - **代理分组与测速**：按分组展示订阅节点，通过 controller 实时切换规则、全局和直连模式；支持单节点和整组测速，按延迟区间显示不同颜色。
 - **连接与实时流量**：每秒通过 controller 获取连接快照，展示进程、目标、代理链、规则及每条连接的上传和下载流量；支持关闭单条或全部连接，概览页显示实时网速和活跃连接。
 - **自定义入站监听**：支持在默认混合端口之外配置多个 `http`、`socks`、`mixed` 监听，每个监听可独立指定路由模式（跟随全局、规则、全局、直连），保存后通过 `-t` 校验并自动重载内核与系统代理。
 - **系统代理**：Windows 写入当前用户的 Internet Settings，并通过 WinINet 通知系统；Linux 通过 `gsettings` 支持 GNOME/Cinnamon 会话，并通过 `kwriteconfig`/`kioslaverc` 自动兼容 KDE Plasma（5/6），支持按自定义监听独立分发 HTTP 与 SOCKS 端口。开启前原子保存用户原有设置，在关闭代理、停止内核或崩溃恢复时还原。
-- **TUN 模式**：Windows 通过 UAC 提权启动内核，并使用随包提供的 wintun；Linux 参考 Clash Verge Rev 的服务模型，首次通过 `pkexec` 安装 root systemd 服务，之后通过按 UID 限制的 IPC 启停，无需重复输入密码；TUN 未生效时自动回退。
+- **TUN 模式**：Windows 通过 UAC 提权启动内核，并使用校验下载的 Wintun；Linux 参考 Clash Verge Rev 的服务模型，通过 `pkexec` 安装 root systemd 服务，所选内核版本变化时刷新服务内核，日常启停走按 UID 限制的 IPC；TUN 未生效时自动回退。
 - **桌面集成**：托盘图标及多语言实时状态、单实例锁、关闭窗口后驻留托盘、深浅色主题、中英文界面。
 - **低内存占用**：桌面客户端自身的内存占用通常低于 30 MB，不含 Mihomo 内核。
 
@@ -70,9 +71,9 @@ Linux 使用 XDG 目录（`~/.config/pure-clash`、`~/.local/share/pure-clash`�
 cargo run
 ```
 
-锁定版本的内核随源码提交：Windows 为 `kernel/<version>/pc-mihomo.exe`，Linux 为 `kernel/<version>/pc-mihomo`，克隆后即可启动真实内核。macOS 二进制未入库，需要按 `kernel/<version>/manifest.json` 中 `targets.macos-*` 的地址下载，并校验 SHA-256。
+源码和发行包均不包含 Mihomo 可执行文件及 `wintun.dll`，编译也不要求这些文件存在或自动联网下载。Windows/Linux x64 首次启动会打开设置页：选择正式发布或 Prebuild，再选择 GitHub 直连或公共下载代理，点击「下载 / 更新」。首次安装成功后启动内核；下载失败时可切换下载方式重试。macOS 暂不支持在线安装。
 
-首次启动时，程序会在当前平台对应的目录中初始化配置和数据，包括仅含 DIRECT 的默认配置、随机生成的 controller secret，以及经过离线校验的随包 Geo 数据库副本。
+首次启动时，程序会在当前平台对应的目录中初始化配置和数据，包括仅含 DIRECT 的默认配置和随机生成的 controller secret。点击「下载 / 更新」会安装内核和三份必需的 Geo 数据库，资源就绪后再启动内核。
 
 ### 打包与发布
 
@@ -90,7 +91,7 @@ pwsh -NoLogo -NoProfile -File .\packaging\windows\build-installer.ps1 -PackageFo
 
 输出为 `dist\pure-clash-<version>-windows-x64-portable.zip`。解压到可写目录后，运行 `pure-clash\pure-clash.exe`。配置、数据和日志会在可执行文件旁创建，迁移时移动整个文件夹即可保留。ZIP 不包含个人配置。使用 `-PackageFormat All` 可在一次构建中生成安装器和便携包。
 
-推送 `v*` 标签后，GitHub Actions 会自动构建 Linux deb / rpm / AppImage，以及 Windows NSIS 安装器和便携 ZIP，并发布到 [Releases](https://github.com/prime-zt/pure-clash/releases)。标签版本必须与 Cargo 包版本一致。deb/rpm 安装到 `/opt/pure-clash`，并创建 `/usr/bin/pure-clash` 符号链接；AppImage 可直接运行。所有发行包均包含内核、Geo 数据库、清单和许可证文件。
+推送 `v*` 标签后，GitHub Actions 会自动构建 Linux deb / rpm / AppImage，以及 Windows NSIS 安装器和便携 ZIP，并发布到 [Releases](https://github.com/prime-zt/pure-clash/releases)。标签版本必须与 Cargo 包版本一致。deb/rpm 安装到 `/opt/pure-clash`，并创建 `/usr/bin/pure-clash` 符号链接；AppImage 可直接运行。发行包仅携带客户端、下载清单和许可证文件，内核与 Geo 数据另行下载到用户数据目录。
 
 ### 开发检查
 
@@ -105,9 +106,11 @@ GPUI 尚未达到 1.0；本项目固定使用 Zed `v1.17.2` 对应的提交 `c8e
 
 ## 内核供应链
 
-随包 Mihomo 内核使用固定版本：`kernel/<version>/manifest.json` 记录版本、许可证和源码地址，`targets` 按构建目标记录下载地址、大小和 SHA-256。构建脚本和安装器会检查文件是否存在并验证哈希，程序不会自动跟随 GitHub latest。内核重命名为 `pc-mihomo`，避免与其他代理客户端的进程重名。
+程序下载官方正式发布或 `Prerelease-Alpha`，校验发布资源的 SHA-256 和可执行文件的 `-v` 输出，并按构建分别安装到 `data/kernel/<version>-<asset-id>`（Linux 使用 XDG 数据目录）。内核重命名为 `pc-mihomo`，避免进程重名。新配置通过新内核的 `-t` 校验后才激活，启动失败恢复旧版本。自动更新默认关闭，开启后在启动后和每 24 小时检查，TUN 更新可能需要 UAC/polkit 授权。兼容已有安装。历史 `kernel/<version>/manifest.json` 保留 Wintun 的锁定来源和哈希，二进制不再入库或打包。
 
-Geo 数据快照通过 `geodata/manifest.json` 独立锁定到 MetaCubeX 官方规则数据仓库的某个提交。构建和打包时校验全部三个数据文件；设置页以支持回滚的完整快照更新它们，订阅校验期间不会隐式下载。
+首次下载使用 `geodata/manifest.json` 锁定的官方提交、大小和 SHA-256；显式更新时固定官方 `release` 提交，读取该提交下的 `.sha256sum` 校验每份文件，再以支持回滚的事务提交完整快照。配置校验不会下载资源。源码和发行包只保留清单与许可信息，不含三份数据库。
+
+默认使用 GitHub 直连，也可选择 GH-Proxy 或 ghfast 公共第三方代理；API 请求先尝试 GitHub，选择代理后可回退 GH-Proxy。切换下载方式不依赖已有内核。哈希用于检测损坏；同时提供元数据与文件的代理也属于信任来源，这些服务的可用性可能变化。
 
 ## 安全模型
 
@@ -140,6 +143,6 @@ Geo 数据快照通过 `geodata/manifest.json` 独立锁定到 MetaCubeX 官方�
 
 本项目采用 [GPL-3.0](LICENSE) 许可证。
 
-随包 Mihomo 内核是未经修改的上游 GPL-3.0 二进制。完整许可证 `LICENSE` 和第三方声明 `NOTICE.md` 位于 `kernel/<version>/`，`manifest.json` 记录对应的源码地址，安装器会将这些文件与内核一同分发。随包 MetaCubeX 规则数据同样采用 GPL-3.0，其固定版本来源、许可证和声明位于 `geodata/`。
+下载的 Mihomo 内核是未经修改的上游 GPL-3.0 二进制，每个安装版本均记录许可证和对应源码地址；历史来源与许可信息保留在 `kernel/<version>/`。MetaCubeX 规则数据同样采用 GPL-3.0，固定来源、许可证和声明位于 `geodata/`。源码与安装包均不包含内核或数据库二进制。
 
 Pure Clash 与 MetaCubeX 无隶属关系，也不代表上游项目的官方认可。项目名称避免使用上游保留的 `mihomo` 字样。

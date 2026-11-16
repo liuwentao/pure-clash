@@ -2,3 +2,9 @@
 /target
 /dist
 *.pdb
+# 内核与驱动由应用校验后下载，不进入源码仓库或发行包。
+/kernel/**/pc-mihomo
+/kernel/**/pc-mihomo.exe
+/kernel/**/wintun.dll
+/geodata/*.dat
+/geodata/*.mmdb

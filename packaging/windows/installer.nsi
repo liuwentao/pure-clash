@@ -19,26 +19,8 @@ ManifestDPIAware true
 !ifndef APP_ICON_SOURCE
   !error "APP_ICON_SOURCE is required"
 !endif
-!ifndef KERNEL_VERSION
-  !error "KERNEL_VERSION is required"
-!endif
-!ifndef KERNEL_BINARY_NAME
-  !error "KERNEL_BINARY_NAME is required"
-!endif
-!ifndef KERNEL_EXE_SOURCE
-  !error "KERNEL_EXE_SOURCE is required"
-!endif
 !ifndef PROJECT_LICENSE_SOURCE
   !error "PROJECT_LICENSE_SOURCE is required"
-!endif
-!ifndef KERNEL_LICENSE_SOURCE
-  !error "KERNEL_LICENSE_SOURCE is required"
-!endif
-!ifndef KERNEL_NOTICE_SOURCE
-  !error "KERNEL_NOTICE_SOURCE is required"
-!endif
-!ifndef KERNEL_MANIFEST_SOURCE
-  !error "KERNEL_MANIFEST_SOURCE is required"
 !endif
 !ifndef GEODATA_ROOT
   !error "GEODATA_ROOT is required"
@@ -121,22 +103,8 @@ Section "主程序（必需）" SecMain
   File "/oname=LICENSE" "${PROJECT_LICENSE_SOURCE}"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
-  ; 内核、许可证和来源清单与主程序一起安装到 manifest 指定的版本目录。
-  SetOutPath "$INSTDIR\kernel\${KERNEL_VERSION}"
-  File "/oname=${KERNEL_BINARY_NAME}" "${KERNEL_EXE_SOURCE}"
-  File "/oname=LICENSE" "${KERNEL_LICENSE_SOURCE}"
-  File "/oname=NOTICE.md" "${KERNEL_NOTICE_SOURCE}"
-  File "/oname=manifest.json" "${KERNEL_MANIFEST_SOURCE}"
-  ; wintun 驱动仅在打包脚本发现 manifest 声明时安装（TUN 能力）。
-  !ifdef KERNEL_WINTUN_SOURCE
-    File "/oname=wintun.dll" "${KERNEL_WINTUN_SOURCE}"
-  !endif
-
-  ; 三份 Geo 基础库随包安装，应用首次启动复制到 data/mihomo 后供内核使用。
+  ; 仅分发 Geo 数据下载清单与许可信息。
   SetOutPath "$INSTDIR\geodata"
-  File "/oname=GeoSite.dat" "${GEODATA_ROOT}\GeoSite.dat"
-  File "/oname=GeoIP.dat" "${GEODATA_ROOT}\GeoIP.dat"
-  File "/oname=Country.mmdb" "${GEODATA_ROOT}\Country.mmdb"
   File "/oname=manifest.json" "${GEODATA_ROOT}\manifest.json"
   File "/oname=LICENSE" "${GEODATA_ROOT}\LICENSE"
   File "/oname=NOTICE.md" "${GEODATA_ROOT}\NOTICE.md"
@@ -181,14 +149,7 @@ Section "Uninstall"
 
   Delete "$INSTDIR\${APP_EXE}"
   Delete "$INSTDIR\LICENSE"
-  Delete "$INSTDIR\kernel\${KERNEL_VERSION}\${KERNEL_BINARY_NAME}"
-  Delete "$INSTDIR\kernel\${KERNEL_VERSION}\LICENSE"
-  Delete "$INSTDIR\kernel\${KERNEL_VERSION}\NOTICE.md"
-  Delete "$INSTDIR\kernel\${KERNEL_VERSION}\manifest.json"
-  ; 兼容带与不带 wintun 驱动的历史安装布局。
-  Delete "$INSTDIR\kernel\${KERNEL_VERSION}\wintun.dll"
-  RMDir "$INSTDIR\kernel\${KERNEL_VERSION}"
-  RMDir "$INSTDIR\kernel"
+  ; 下载的内核位于 data/kernel，卸载时与用户数据一并保留。
   ; 仅清理安装资源；data/mihomo 下可能是用户更新版本，继续保留。
   Delete "$INSTDIR\geodata\GeoSite.dat"
   Delete "$INSTDIR\geodata\GeoIP.dat"

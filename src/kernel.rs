@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 use crate::platform::{AppPaths, kernel_binary_name};
 
+pub(crate) mod update;
+
 /// 确保 unix 内核文件具备可执行位；随包文件由应用管理，缺失时直接补齐。
 #[cfg(target_os = "linux")]
 fn ensure_executable(path: &Path) -> std::io::Result<()> {
@@ -51,7 +53,17 @@ pub(crate) fn bundled_path(paths: &AppPaths, version: &str) -> std::io::Result<P
         ));
     }
 
-    let installed_path = bundled_path_in(paths, version);
+    let downloaded = paths
+        .data_dir
+        .join("kernel")
+        .join(version)
+        .join(kernel_binary_name());
+    let installed_path = if downloaded.is_file() {
+        downloaded
+    } else {
+        // 兼容旧安装目录，升级应用不要求重新下载已可用的内核。
+        bundled_path_in(paths, version)
+    };
 
     // `cargo run` 的可执行文件位于 target 目录，开发构建回退到仓库内核；release 始终使用安装目录。
     #[cfg(debug_assertions)]
@@ -81,7 +93,7 @@ pub(crate) fn is_available(paths: &AppPaths, version: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn is_valid_version(version: &str) -> bool {
+pub(crate) fn is_valid_version(version: &str) -> bool {
     // 配置来自本地文件，只接受版本目录允许的字符，避免路径穿越或特殊路径语义。
     !version.is_empty()
         && version != "."
@@ -123,6 +135,33 @@ mod tests {
         assert!(!is_valid_version(".."));
         assert!(!is_valid_version(r"test-version\other"));
         assert!(is_valid_version("test-version"));
+    }
+
+    #[test]
+    fn downloaded_kernel_takes_precedence_over_legacy_installation() {
+        let root =
+            std::env::temp_dir().join(format!("pure-clash-kernel-path-{}", uuid::Uuid::new_v4()));
+        let paths = AppPaths::portable(&root);
+        let version = "test-version";
+        let downloaded = paths
+            .data_dir
+            .join("kernel")
+            .join(version)
+            .join(kernel_binary_name());
+        let legacy = bundled_path_in(&paths, version);
+        for path in [&downloaded, &legacy] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"kernel").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        assert_eq!(bundled_path(&paths, version).unwrap(), downloaded);
+        std::fs::remove_file(&downloaded).unwrap();
+        assert_eq!(bundled_path(&paths, version).unwrap(), legacy);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "linux")]

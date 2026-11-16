@@ -118,6 +118,10 @@ pub(crate) struct AppConfig {
     /// 旧配置缺少该字段时为 None，首次读取后会补写当前随包版本。
     #[serde(default)]
     pub(crate) bundled_mihomo_version: Option<String>,
+    /// 下载渠道与传输方式独立保存，首次没有内核时也可以选择公共 GitHub 代理。
+    pub(crate) kernel_channel: crate::kernel::update::Channel,
+    pub(crate) kernel_download_source: crate::kernel::update::DownloadSource,
+    pub(crate) kernel_auto_update: bool,
     /// 界面主题，可选值为 `dark` 或 `light`，默认为 `dark`。
     pub(crate) theme: Theme,
     /// 界面语言，可选值为 `zh-CN` 或 `en-US`，默认为 `zh-CN`。
@@ -145,6 +149,9 @@ impl Default for AppConfig {
         Self {
             mihomo_version: default_mihomo_version(),
             bundled_mihomo_version: Some(default_mihomo_version()),
+            kernel_channel: Default::default(),
+            kernel_download_source: Default::default(),
+            kernel_auto_update: false,
             theme: Theme::default(),
             language: Language::default(),
             find_process_always: false,
@@ -209,10 +216,8 @@ fn load_or_create_with_paths(paths: AppPaths) -> Result<LoadedConfig> {
     fs::create_dir_all(&paths.profiles_dir)
         .with_context(|| format!("无法创建配置订阅目录：{}", paths.profiles_dir.display()))?;
 
-    // Geo 规则库随安装包分发，首次启动只从本地只读资源复制到 Mihomo 数据目录。
-    // 初始化失败时直接中止，避免后续订阅校验退化为依赖用户网络的隐式下载。
-    let geodata_info =
-        crate::mihomo::geodata::ensure_bundled(&paths).context("无法初始化随包 Geo 数据")?;
+    // 缺少资源时仍打开设置页；下载由用户显式发起，配置初始化不能依赖网络。
+    let geodata_info = crate::mihomo::geodata::ensure_bundled(&paths).unwrap_or_default();
 
     if !paths.default_mihomo_config_file.exists() {
         // 默认文件只在缺失时生成，后续启动不得覆盖用户已经编辑的 YAML。
@@ -274,6 +279,21 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn kernel_download_options_default_and_round_trip() {
+        use crate::kernel::update::{Channel, DownloadSource};
+        let mut config: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.kernel_channel, Channel::Stable);
+        assert_eq!(config.kernel_download_source, DownloadSource::Direct);
+        assert!(!config.kernel_auto_update);
+        config.kernel_channel = Channel::Prebuild;
+        config.kernel_download_source = DownloadSource::Ghfast;
+        config.kernel_auto_update = true;
+        let restored: AppConfig =
+            serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_eq!(restored, config);
+    }
+
     fn test_dir(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -283,6 +303,16 @@ mod tests {
             "pure-clash-config-{name}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    fn write_test_kernel(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).expect("应创建测试内核文件");
+        // macOS 路径检查要求可执行位，Linux 在解析时补齐；夹具统一模拟已安装内核。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     #[test]
@@ -355,7 +385,7 @@ mod tests {
             .join("kernel/test-version")
             .join(crate::platform::kernel_binary_name());
         fs::create_dir_all(custom_kernel.parent().unwrap()).expect("应创建自定义内核目录");
-        fs::write(&custom_kernel, b"custom-kernel").expect("应创建自定义内核文件");
+        write_test_kernel(&custom_kernel, b"custom-kernel");
         loaded.config.theme = Theme::Light;
         loaded.config.language = Language::English;
         loaded.config.mihomo_version = "test-version".to_owned();
@@ -440,7 +470,7 @@ mod tests {
             .join(custom_version)
             .join(crate::platform::kernel_binary_name());
         fs::create_dir_all(custom_kernel.parent().unwrap()).expect("应创建自定义内核目录");
-        fs::write(custom_kernel, b"custom-kernel").expect("应创建自定义内核文件");
+        write_test_kernel(&custom_kernel, b"custom-kernel");
         let mut custom = upgraded.config;
         custom.mihomo_version = custom_version.to_owned();
         custom.save(&root.join("config/app.json")).unwrap();

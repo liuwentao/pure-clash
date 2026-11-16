@@ -1,6 +1,6 @@
 # Mihomo Third-Party Notice
 
-Pure Clash packages include unmodified official Mihomo binaries for the targets listed in `manifest.json`, including the Windows amd64-compatible and Linux amd64 builds.
+Pure Clash source and packages do not include Mihomo binaries. This historical manifest records the previous bundled release and pins the Wintun download. The application downloads official Mihomo releases separately and records their source and license beside the installed kernel.
 
 - Upstream project: MetaCubeX/mihomo
 - Kernel version: v1.19.30
