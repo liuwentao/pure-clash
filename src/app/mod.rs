@@ -1804,7 +1804,8 @@ impl PureClash {
 
     /// 在主线程捕获出口状态，后台下载期间不切换模式或关闭 TUN。
     fn subscription_proxy(&self) -> Option<profile::SubscriptionProxy> {
-        if !self.mihomo_running() || !(self.system_proxy || self.tun_state == SwitchState::On) {
+        // 订阅显式使用内核入口，不依赖系统代理或 TUN 开关。
+        if !self.mihomo_running() {
             return None;
         }
         let baseline = self.baseline.as_ref()?;
